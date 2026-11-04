@@ -1,0 +1,13 @@
+build/
+out/
+.vs/
+.vscode/
+.cache/
+compile_commands.json
+*.ppm
+
+# Never commit copyrighted BIOS dumps or game ROMs.
+*.bin
+*.gba
+*.sav
+roms/
