@@ -175,14 +175,33 @@ TEST(fiq_banks_r8_to_r12)
     CHECK_EQ(cpu.reg(13), 0x03007F00u);
 }
 
-// An opcode we don't support yet must halt cleanly with an error, without moving the PC.
-TEST(unimplemented_instruction_halts_with_error)
+// BX to an odd address must enter Thumb state. Thumb isn't implemented until M2, so the
+// next step must halt cleanly with an error instead of executing garbage.
+TEST(bx_enters_thumb_then_halts_until_m2)
 {
     auto gba = boot({
-        0xE0000291, // mul r0, r1, r2 (not implemented in M0)
+        0xE12FFF10, // bx r0
     });
+    gba->cpu().set_reg(0, 0x08000009);
     run_steps(*gba, 3);
+    CHECK(gba->cpu().thumb());
+    CHECK_EQ(gba->cpu().pc(), 0x08000008u);
     CHECK(gba->cpu().halted());
     CHECK(!gba->cpu().error().empty());
-    CHECK_EQ(gba->cpu().pc(), 0x08000000u);
+}
+
+// A compare op with S set and Rd = 15 (e.g. the odd encoding "cmp pc, pc, r0") restores
+// CPSR from SPSR, switching modes, but must not branch. Found by jsmolka arm.gba test 234/235.
+TEST(compare_with_rd_pc_restores_cpsr_without_branching)
+{
+    auto gba = boot({
+        0xE15FF000, // cmp pc, pc, r0   (Rd = 15)
+        0xE3A00001, // mov r0, #1
+    });
+    gba->cpu().set_cpsr(static_cast<u32>(CpuMode::Fiq));
+    gba->cpu().set_spsr(static_cast<u32>(CpuMode::System));
+    run_steps(*gba, 2);
+    CHECK(gba->cpu().mode() == CpuMode::System);
+    CHECK_EQ(gba->cpu().reg(0), 1u);
+    CHECK_EQ(gba->cpu().pc(), 0x08000008u);
 }

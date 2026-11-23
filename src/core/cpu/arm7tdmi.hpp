@@ -117,6 +117,14 @@ public:
     // Used to set up the per-mode stacks the BIOS would normally initialise.
     void set_banked_sp(CpuMode mode, u32 value);
 
+    // Tells the CPU whether a real BIOS is mapped at 0x00000000. Without one, the SWI and
+    // undefined-instruction vectors point at empty memory, so instead of jumping there the
+    // CPU halts with an explanatory error (until high-level BIOS emulation lands in M3).
+    void set_bios_loaded(bool loaded)
+    {
+        bios_loaded_ = loaded;
+    }
+
     // Returns whether the CPU has stopped because of an error (e.g. an unimplemented opcode).
     bool halted() const
     {
@@ -162,6 +170,14 @@ private:
     // Halts the CPU and records `message` (plus the faulting address) for the frontend.
     void fail(const std::string& message);
 
+    // Takes a CPU exception: saves CPSR into the new mode's SPSR, switches to `new_mode`
+    // in ARM state with IRQs disabled, stores `return_addr` in that mode's r14, and jumps
+    // to the exception vector at `vector`.
+    void raise_exception(CpuMode new_mode, u32 vector, u32 return_addr);
+
+    // Enters the undefined-instruction handler (vector 0x04), or halts if there is no BIOS.
+    int undefined_instruction();
+
     // Decodes a 32-bit ARM opcode and dispatches to the matching handler below.
     int execute_arm(u32 instr);
 
@@ -182,6 +198,24 @@ private:
 
     // LDR / STR / LDRB / STRB: single word or byte memory transfer.
     int arm_single_transfer(u32 instr);
+
+    // MUL / MLA: 32-bit multiply, optionally adding an accumulator register.
+    int arm_multiply(u32 instr);
+
+    // UMULL / UMLAL / SMULL / SMLAL: 32x32 -> 64-bit multiply, optionally accumulating.
+    int arm_multiply_long(u32 instr);
+
+    // LDRH / STRH / LDRSB / LDRSH: halfword and sign-extending memory transfers.
+    int arm_halfword_transfer(u32 instr);
+
+    // SWP / SWPB: atomically swap a register with a word or byte in memory.
+    int arm_swap(u32 instr);
+
+    // LDM / STM: load or store any subset of r0-r15 to consecutive memory words.
+    int arm_block_transfer(u32 instr);
+
+    // SWI: software interrupt, used by games to call BIOS functions.
+    int arm_software_interrupt(u32 instr);
 
     // Computes a data-processing instruction's second operand by running it through the
     // barrel shifter. Also produces the shifter's carry-out, which logical ops put in C.
@@ -210,6 +244,9 @@ private:
 
     // Set by flush_pipeline() so step() knows not to advance r15 after the instruction.
     bool flushed_ = false;
+
+    // Whether a BIOS image is mapped, i.e. whether exception vectors lead anywhere useful.
+    bool bios_loaded_ = false;
 
     // True once the CPU has hit something it cannot execute; step() then does nothing.
     bool halted_ = false;

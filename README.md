@@ -2,7 +2,19 @@
 
 A Game Boy Advance emulator written in C++20.
 
-Status: early scaffold (milestone M0). See [docs/SPEC.md](docs/SPEC.md) for the full spec and roadmap.
+Status: the ARM CPU is complete (milestone M1; passes jsmolka's `arm.gba` apart from its one Thumb test).
+Thumb (M2) is next. See [docs/SPEC.md](docs/SPEC.md) for the full spec and roadmap.
+
+## Project Layout
+
+Each folder has its own README explaining what's in it:
+
+| Folder | Contents |
+|---|---|
+| [`src/core/`](src/core/) | The emulator library: [CPU](src/core/cpu/), [memory bus](src/core/memory/), [cartridge](src/core/cartridge/), [graphics](src/core/ppu/) |
+| [`src/frontend/`](src/frontend/) | Programs built on the core; currently the [command-line runner](src/frontend/cli/) |
+| [`tests/`](tests/) | Unit tests |
+| [`docs/`](docs/) | The spec and roadmap |
 
 ## Build
 

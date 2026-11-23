@@ -53,6 +53,7 @@ void Gba::reset()
     bus_->io_set16(io::KEYINPUT, 0x03FF);
 
     cpu_->reset();
+    cpu_->set_bios_loaded(has_bios_);
     ppu_->reset();
     if (!has_bios_)
     {

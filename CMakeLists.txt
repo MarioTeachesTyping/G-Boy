@@ -39,6 +39,9 @@ if(GBOY_BUILD_TESTS)
     add_executable(gboy_tests
         tests/main.cpp
         tests/test_cpu_arm.cpp
+        tests/test_cpu_arm_exceptions.cpp
+        tests/test_cpu_arm_multiply.cpp
+        tests/test_cpu_arm_transfer.cpp
         tests/test_system.cpp
     )
     target_link_libraries(gboy_tests PRIVATE gboy_core)

@@ -4,12 +4,15 @@
 
 // Decoding and execution of 32-bit ARM instructions.
 //
-// Implemented (M0): B, BL, BX, all 16 data-processing ops with the full
-// barrel shifter, MRS, MSR, LDR/STR/LDRB/STRB.
-// Planned (M1):     MUL/MLA, long multiplies, halfword & signed transfers,
-//                   LDM/STM, SWP, SWI and the undefined-instruction trap.
+// Covers the complete ARMv4 instruction set as used on the GBA: branches, the
+// 16 data-processing ops with the barrel shifter, PSR transfers, multiplies,
+// single/halfword/block transfers, SWP, SWI, and the undefined-instruction trap.
 
 #include "core/cpu/arm7tdmi.hpp"
+
+#include <bit>
+#include <cstdio>
+
 #include "core/memory/bus.hpp"
 
 namespace gboy
@@ -156,23 +159,19 @@ int Arm7tdmi::execute_arm(u32 instr)
     }
     if ((instr & 0x0FC000F0) == 0x00000090)
     {
-        fail("ARM MUL/MLA not implemented (M1)");
-        return 1;
+        return arm_multiply(instr);
     }
     if ((instr & 0x0F8000F0) == 0x00800090)
     {
-        fail("ARM long multiply not implemented (M1)");
-        return 1;
+        return arm_multiply_long(instr);
     }
     if ((instr & 0x0FB00FF0) == 0x01000090)
     {
-        fail("ARM SWP not implemented (M1)");
-        return 1;
+        return arm_swap(instr);
     }
     if ((instr & 0x0E000090) == 0x00000090)
     {
-        fail("ARM halfword transfer not implemented (M1)");
-        return 1;
+        return arm_halfword_transfer(instr);
     }
     if ((instr & 0x0C000000) == 0x00000000)
     {
@@ -180,8 +179,7 @@ int Arm7tdmi::execute_arm(u32 instr)
     }
     if ((instr & 0x0E000010) == 0x06000010)
     {
-        fail("ARM undefined instruction");
-        return 1;
+        return undefined_instruction();
     }
     if ((instr & 0x0C000000) == 0x04000000)
     {
@@ -189,17 +187,16 @@ int Arm7tdmi::execute_arm(u32 instr)
     }
     if ((instr & 0x0E000000) == 0x08000000)
     {
-        fail("ARM LDM/STM not implemented (M1)");
-        return 1;
+        return arm_block_transfer(instr);
     }
     if ((instr & 0x0F000000) == 0x0F000000)
     {
-        fail("ARM SWI not implemented (M1)");
-        return 1;
+        return arm_software_interrupt(instr);
     }
 
-    fail("ARM coprocessor instruction (unsupported on GBA)");
-    return 1;
+    // Everything left is a coprocessor instruction. The GBA has no coprocessors, so the
+    // hardware treats them all as undefined.
+    return undefined_instruction();
 }
 
 int Arm7tdmi::arm_branch(u32 instr)
@@ -338,10 +335,12 @@ int Arm7tdmi::arm_data_processing(u32 instr)
 
     if (set_flags)
     {
-        if (rd == 15 && !is_test)
+        if (rd == 15)
         {
             // Writing PC with S set is the exception-return idiom (e.g. SUBS pc, lr, #4):
             // it restores CPSR from the current mode's SPSR instead of setting flags.
+            // The compare ops (TST/TEQ/CMP/CMN) with Rd = 15 do the same CPSR restore,
+            // even though they never write r15 and so don't branch.
             set_cpsr(spsr());
         }
         else
@@ -495,6 +494,308 @@ int Arm7tdmi::arm_single_transfer(u32 instr)
         regs_[rn] = offset_addr;
     }
     return 2;
+}
+
+namespace
+{
+
+// Returns the number of extra internal cycles the ARM7TDMI's multiplier needs for an
+// operand `rs`. The multiplier processes 8 bits per cycle and stops early once the
+// remaining upper bits are all zeros (or, for signed multiplies, all ones).
+int multiplier_cycles(u32 rs, bool allow_ones)
+{
+    int cycles = 1;
+    for (u32 mask = 0xFFFFFF00u; mask != 0 && cycles < 4; mask <<= 8)
+    {
+        const u32 upper = rs & mask;
+        if (upper == 0 || (allow_ones && upper == mask))
+        {
+            break;
+        }
+        ++cycles;
+    }
+    return cycles;
+}
+
+}
+
+int Arm7tdmi::arm_multiply(u32 instr)
+{
+    const bool accumulate = bit(instr, 21);
+    const bool set_flags = bit(instr, 20);
+    const u32 rd = bits(instr, 19, 16);
+    const u32 rn = bits(instr, 15, 12);
+    const u32 rs = bits(instr, 11, 8);
+    const u32 rm = instr & 0xF;
+
+    u32 result = regs_[rm] * regs_[rs];
+    if (accumulate)
+    {
+        result += regs_[rn];
+    }
+    regs_[rd] = result;
+
+    // Only N and Z are meaningful. The ARM7TDMI leaves C in an implementation-specific
+    // state that no software relies on, so we leave it untouched; V is never affected.
+    if (set_flags)
+    {
+        set_nz(result);
+    }
+    return 1 + multiplier_cycles(regs_[rs], true) + (accumulate ? 1 : 0);
+}
+
+int Arm7tdmi::arm_multiply_long(u32 instr)
+{
+    const bool is_signed = bit(instr, 22);
+    const bool accumulate = bit(instr, 21);
+    const bool set_flags = bit(instr, 20);
+    const u32 rd_hi = bits(instr, 19, 16);
+    const u32 rd_lo = bits(instr, 15, 12);
+    const u32 rs = bits(instr, 11, 8);
+    const u32 rm = instr & 0xF;
+
+    u64 result;
+    if (is_signed)
+    {
+        const s64 product = static_cast<s64>(static_cast<s32>(regs_[rm])) * static_cast<s32>(regs_[rs]);
+        result = static_cast<u64>(product);
+    }
+    else
+    {
+        result = static_cast<u64>(regs_[rm]) * regs_[rs];
+    }
+
+    // The accumulating forms add the existing 64-bit value held in RdHi:RdLo.
+    if (accumulate)
+    {
+        result += (static_cast<u64>(regs_[rd_hi]) << 32) | regs_[rd_lo];
+    }
+
+    const int cycles = 2 + multiplier_cycles(regs_[rs], is_signed) + (accumulate ? 1 : 0);
+    regs_[rd_lo] = static_cast<u32>(result);
+    regs_[rd_hi] = static_cast<u32>(result >> 32);
+
+    if (set_flags)
+    {
+        cpsr_ &= ~(psr::N | psr::Z);
+        if (result >> 63)
+        {
+            cpsr_ |= psr::N;
+        }
+        if (result == 0)
+        {
+            cpsr_ |= psr::Z;
+        }
+    }
+    return cycles;
+}
+
+int Arm7tdmi::arm_halfword_transfer(u32 instr)
+{
+    const bool pre_index = bit(instr, 24);
+    const bool up = bit(instr, 23);
+    const bool immediate = bit(instr, 22);
+    const bool write_back = bit(instr, 21);
+    const bool load = bit(instr, 20);
+    const u32 rn = bits(instr, 19, 16);
+    const u32 rd = bits(instr, 15, 12);
+    const u32 kind = bits(instr, 6, 5); // 1 = unsigned halfword, 2 = signed byte, 3 = signed halfword
+
+    // The immediate offset is split into two nibbles around the S/H bits.
+    const u32 offset = immediate ? ((bits(instr, 11, 8) << 4) | (instr & 0xF)) : regs_[instr & 0xF];
+
+    const u32 base = regs_[rn];
+    const u32 offset_addr = up ? base + offset : base - offset;
+    const u32 addr = pre_index ? offset_addr : base;
+    const bool do_write_back = !pre_index || write_back;
+
+    if (!load)
+    {
+        // Stores only exist for unsigned halfwords on ARMv4; the signed encodings with L=0
+        // are the ARMv5 LDRD/STRD, which the ARM7TDMI does not have.
+        if (kind != 1)
+        {
+            return undefined_instruction();
+        }
+        const u32 value = regs_[rd] + (rd == 15 ? 4 : 0);
+        bus_.write16(addr, static_cast<u16>(value));
+        if (do_write_back)
+        {
+            regs_[rn] = offset_addr;
+        }
+        return 2;
+    }
+
+    u32 value;
+    switch (kind)
+    {
+        case 1:
+            // An unaligned LDRH reads the aligned halfword and rotates it right by 8 bits,
+            // which moves the low byte up into bits 24-31.
+            value = ror32(bus_.read16(addr), (addr & 1) * 8);
+            break;
+        case 2:
+            value = static_cast<u32>(sign_extend(bus_.read8(addr), 8));
+            break;
+        case 3:
+        default:
+            // An unaligned LDRSH can't read a halfword, so the ARM7TDMI sign-extends the
+            // addressed byte instead (it behaves exactly like LDRSB).
+            if (addr & 1)
+            {
+                value = static_cast<u32>(sign_extend(bus_.read8(addr), 8));
+            }
+            else
+            {
+                value = static_cast<u32>(sign_extend(bus_.read16(addr), 16));
+            }
+            break;
+    }
+
+    if (do_write_back)
+    {
+        regs_[rn] = offset_addr;
+    }
+    regs_[rd] = value;
+    if (rd == 15)
+    {
+        flush_pipeline();
+        return 5;
+    }
+    return 3;
+}
+
+int Arm7tdmi::arm_swap(u32 instr)
+{
+    const bool byte = bit(instr, 22);
+    const u32 rn = bits(instr, 19, 16);
+    const u32 rd = bits(instr, 15, 12);
+    const u32 rm = instr & 0xF;
+    const u32 addr = regs_[rn];
+
+    // Read first, then write, so SWP r0, r0, [r1] correctly exchanges the two values.
+    if (byte)
+    {
+        const u32 old = bus_.read8(addr);
+        bus_.write8(addr, static_cast<u8>(regs_[rm]));
+        regs_[rd] = old;
+    }
+    else
+    {
+        const u32 old = ror32(bus_.read32(addr), (addr & 3) * 8);
+        bus_.write32(addr, regs_[rm]);
+        regs_[rd] = old;
+    }
+    return 4;
+}
+
+int Arm7tdmi::arm_block_transfer(u32 instr)
+{
+    const bool pre_index = bit(instr, 24);
+    const bool up = bit(instr, 23);
+    const bool psr_or_user = bit(instr, 22);
+    const bool write_back = bit(instr, 21);
+    const bool load = bit(instr, 20);
+    const u32 rn = bits(instr, 19, 16);
+    u32 rlist = instr & 0xFFFF;
+
+    // An empty register list is a hardware quirk: the ARM7TDMI transfers r15 alone, but
+    // moves the base address as if all 16 registers had been transferred.
+    u32 count = static_cast<u32>(std::popcount(rlist));
+    if (rlist == 0)
+    {
+        rlist = 1u << 15;
+        count = 16;
+    }
+
+    // Registers are always transferred lowest-numbered first at the lowest address, so work
+    // out where the lowest address is for each of the four addressing modes (IA/IB/DA/DB).
+    const u32 base = regs_[rn];
+    const u32 new_base = up ? base + count * 4 : base - count * 4;
+    u32 addr;
+    if (up)
+    {
+        addr = pre_index ? base + 4 : base;
+    }
+    else
+    {
+        addr = pre_index ? new_base : new_base + 4;
+    }
+
+    // With the S bit set, an LDM that includes r15 is an exception return (CPSR = SPSR).
+    // Any other S-bit transfer accesses the User-mode registers instead of the current bank.
+    const bool loads_pc = load && (rlist & (1u << 15));
+    const bool user_bank = psr_or_user && !loads_pc;
+    const CpuMode original_mode = mode();
+    if (user_bank)
+    {
+        switch_mode(CpuMode::User);
+    }
+
+    bool first = true;
+    for (u32 i = 0; i < 16; ++i)
+    {
+        if (!(rlist & (1u << i)))
+        {
+            continue;
+        }
+
+        if (load)
+        {
+            // Write back before loading so that, if Rn is in the list, the loaded value wins.
+            if (first && write_back)
+            {
+                regs_[rn] = new_base;
+            }
+            regs_[i] = bus_.read32(addr);
+        }
+        else
+        {
+            // STM stores r15 as instruction + 12.
+            bus_.write32(addr, regs_[i] + (i == 15 ? 4 : 0));
+
+            // Write-back happens after the first store. So if Rn is the lowest register in
+            // the list the old base is stored; if it comes later, the updated base is.
+            if (first && write_back)
+            {
+                regs_[rn] = new_base;
+            }
+        }
+        first = false;
+        addr += 4;
+    }
+
+    if (user_bank)
+    {
+        switch_mode(original_mode);
+    }
+
+    if (loads_pc)
+    {
+        if (psr_or_user)
+        {
+            set_cpsr(spsr());
+        }
+        flush_pipeline();
+        return static_cast<int>(count) + 4;
+    }
+    return static_cast<int>(count) + (load ? 2 : 1);
+}
+
+int Arm7tdmi::arm_software_interrupt(u32 instr)
+{
+    if (!bios_loaded_)
+    {
+        // In ARM state the BIOS function number lives in bits 23-16 of the comment field.
+        char message[96];
+        std::snprintf(message, sizeof(message), "SWI 0x%02X called without a BIOS (BIOS emulation comes in M3)",
+                      bits(instr, 23, 16));
+        fail(message);
+        return 1;
+    }
+
+    raise_exception(CpuMode::Supervisor, 0x00000008, pc() + 4);
+    return 3;
 }
 
 }

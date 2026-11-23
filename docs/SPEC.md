@@ -1,6 +1,6 @@
-# GBoy — Game Boy Advance Emulator Spec & Plan
+# G-Boy — Game Boy Advance Emulator Spec & Plan
 
-Status: **M0 (scaffold) done**. Everything below M0 is planned work.
+Status: **M0 done; M1 done except one Thumb-dependent test.** jsmolka `arm.gba` passes every ARM test (r12 = 0) when its single Thumb interworking test (#51) is skipped; the unmodified ROM will pass once M2 lands. armwrestler not yet run. Everything after M1 is planned work.
 
 ## 1. Goals
 
@@ -11,14 +11,14 @@ Status: **M0 (scaffold) done**. Everything below M0 is planned work.
 - Keep the door open for the "twist" (a user-facing CPU debugger) by making CPU state, memory,
   and stepping fully inspectable through the core API — but no debugger work yet.
 
-## Non-goals (for now)
+## Non-Goals (For Now)
 
 - Game Boy / Game Boy Color backwards compatibility (the GBA's Z80-ish co-processor).
 - Link cable, GBA peripherals (e-Reader, solar sensor, rumble, RTC beyond what saves need).
 - JIT / dynarec. An interpreter is plenty fast for the GBA's 16.78 MHz CPU.
 - Shipping a BIOS. Users supply their own `gba_bios.bin`, or we boot without one (HLE skip, see §6).
 
-## 2. Hardware summary (what we're emulating)
+## 2. Hardware Summary (What We're Emulating)
 
 | Part      | Details |
 |-----------|---------|
@@ -28,7 +28,7 @@ Status: **M0 (scaffold) done**. Everything below M0 is planned work.
 | Sound     | 4 legacy GB channels + 2 Direct Sound FIFO channels (8-bit PCM via DMA/timers). |
 | Other     | 4 DMA channels, 4 timers, interrupt controller, keypad, serial, wait-state control. |
 
-### Memory map
+### Memory Map
 
 | Range                    | Size   | Region | Bus width |
 |--------------------------|--------|--------|-----------|
@@ -59,7 +59,7 @@ Status: **M0 (scaffold) done**. Everything below M0 is planned work.
             +----------------------------------------------+
 ```
 
-Directory layout:
+Directory Layout:
 
 ```
 src/core/            platform-free emulator library (gboy_core)
@@ -76,7 +76,7 @@ tests/               zero-dependency unit tests (tiny built-in harness)
 docs/                this spec
 ```
 
-### Key design decisions
+### Key Design Decisions
 
 1. **Core is a library, frontends are thin.** Nothing in `src/core` includes SDL, OS headers, or does I/O
    other than through byte buffers. This is what makes the future debugger cheap.
@@ -98,7 +98,7 @@ docs/                this spec
 | #  | Milestone | Scope | Done when |
 |----|-----------|-------|-----------|
 | M0 | **Scaffold** ✅ | Build system, memory map + bus, cartridge header parsing, ARM register file & mode banking, core ARM instrs (B/BL/BX, all data-processing, MRS/MSR, LDR/STR), PPU line timing + mode 3, CLI, unit tests | `make test` passes; CLI loads a ROM and prints the header |
-| M1 | ARM ISA complete | Multiply / long multiply, halfword & signed transfers, LDM/STM (incl. user-bank + PC quirks), SWP, SWI/undefined exceptions, register-shift PC+12 quirk, unaligned-access rotation | jsmolka `arm.gba` passes, armwrestler ARM tests pass |
+| M1 | ARM ISA complete ✅* | Multiply / long multiply, halfword & signed transfers, LDM/STM (incl. user-bank + PC quirks), SWP, SWI/undefined exceptions, register-shift PC+12 quirk, unaligned-access rotation | jsmolka `arm.gba` passes, armwrestler ARM tests pass |
 | M2 | Thumb ISA | All 19 Thumb formats, ARM↔Thumb interworking | jsmolka `thumb.gba` passes |
 | M3 | System | IRQ controller (IE/IF/IME), HALT, timers, DMA (immediate/VBlank/HBlank/FIFO), keypad, WAITCNT cycle timing, event scheduler, BIOS boot + HLE SWI fallbacks | jsmolka `memory.gba`, `bios.gba` pass; real BIOS boots to the logo |
 | M4 | Full PPU | Modes 0–5, affine BGs, sprites (incl. affine), priority, windows, alpha/brightness blending, mosaic | tonc demos render correctly; a handful of commercial games reach gameplay |
@@ -107,7 +107,7 @@ docs/                this spec
 | M7 | Saves | Auto-detect SRAM / Flash 64K/128K / EEPROM 512B/8K, `.sav` persistence, save states | Saves survive restarts |
 | M8 | Twist | CPU debugger UI (disassembler, breakpoints, memory viewer) — redesign TBD | — |
 
-## 5. Testing strategy
+## 5. Testing Strategy
 
 - **Unit tests** (`tests/`): hand-assembled instruction sequences loaded into a fake ROM, asserting registers,
   flags, memory and framebuffer contents. No external framework — keeps the build dependency-free.
@@ -118,7 +118,7 @@ docs/                this spec
   - tonc examples for PPU features
 - A future `--headless --frames N --dump-ppm` CLI path lets us screenshot-diff test ROM output in CI.
 
-## 6. BIOS policy
+## 6. BIOS Policy
 
 The Nintendo BIOS is copyrighted and is never committed. The CLI accepts `--bios <path>`. Without it,
 `Gba::skip_bios()` sets the post-BIOS register state (SVC SP `0x03007FE0`, IRQ SP `0x03007FA0`,
@@ -133,7 +133,7 @@ so BIOS-less play works for most games; an open-source replacement BIOS is anoth
 - Warnings on (`-Wall -Wextra -Wpedantic`), treated as errors in CI later.
 - SDL2/SDL3 will be pulled via CMake `FetchContent` when the M5 frontend lands.
 
-## 8. Code style
+## 8. Code Style
 
 - **Allman braces, always.** Every `{` goes on its own line directly under the statement that opens it
   (namespaces, classes, functions, control blocks, lambdas, even one-line getters), so it lines up with its `}`.
@@ -153,11 +153,15 @@ so BIOS-less play works for most games; an open-source replacement BIOS is anoth
 - No `// namespace foo` comments after a namespace's closing brace.
 - Naming: `PascalCase` types, `snake_case` functions and variables, trailing `_` for private members,
   `kPascalCase` constants.
+- **Markdown headings capitalize every word**, small words included; text in backticks keeps its case.
+- Each source folder keeps a `README.md` describing what's in it, updated alongside the code.
 
-## 9. Known simplifications in M0
+## 9. Known Simplifications (Current)
 
-- 1 cycle per instruction, no wait states.
-- Thumb mode, multiplies, halfword/block transfers, SWI halt the CPU with an "unimplemented" error.
+- Instruction cycle counts are approximate (internal cycles only, no N/S distinction, no wait states).
+- Thumb state halts the CPU with an "unimplemented" error (M2).
+- Without a BIOS, SWI and undefined-instruction exceptions halt with an error instead of jumping to an empty vector (HLE BIOS in M3).
+- MUL/MLA leave the C flag unchanged (real hardware sets it to a meaningless value).
 - Byte writes to VRAM/palette/OAM are stored as bytes (hardware duplicates/ignores them).
 - Open-bus reads return 0; BIOS read protection not modelled.
 - Only video mode 3 is rendered.

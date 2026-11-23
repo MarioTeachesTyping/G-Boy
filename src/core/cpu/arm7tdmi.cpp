@@ -192,6 +192,36 @@ void Arm7tdmi::fail(const std::string& message)
     halted_ = true;
 }
 
+void Arm7tdmi::raise_exception(CpuMode new_mode, u32 vector, u32 return_addr)
+{
+    const u32 old_cpsr = cpsr_;
+    switch_mode(new_mode);
+    set_spsr(old_cpsr);
+    regs_[14] = return_addr;
+
+    // Exception handlers always start in ARM state with IRQs masked; FIQ entry also masks FIQs.
+    cpsr_ &= ~psr::T;
+    cpsr_ |= psr::I;
+    if (new_mode == CpuMode::Fiq)
+    {
+        cpsr_ |= psr::F;
+    }
+    jump(vector);
+}
+
+int Arm7tdmi::undefined_instruction()
+{
+    if (!bios_loaded_)
+    {
+        fail("Undefined instruction (no BIOS loaded to handle the exception)");
+        return 1;
+    }
+
+    // The handler returns with MOVS pc, lr, so lr must hold the address of the next instruction.
+    raise_exception(CpuMode::Undefined, 0x00000004, pc() + (thumb() ? 2 : 4));
+    return 3;
+}
+
 int Arm7tdmi::step()
 {
     if (halted_)
